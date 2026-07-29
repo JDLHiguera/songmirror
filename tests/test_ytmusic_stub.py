@@ -88,3 +88,19 @@ def test_empty_library_on_live_session_is_honest():
 def test_library_maps_by_casefolded_title():
     got = _target([{"title": "Chai & Chill", "playlistId": "p1", "count": 3}], alive=True).list_playlists()
     assert got["chai & chill"]["playlistId"] == "p1"
+
+
+def test_topic_channel_reads_as_the_plain_artist():
+    # youtubei returns either shape for the same video across passes; both must
+    # normalize to one artist string or the track's canonical id flaps, and a
+    # re-keyed entry is indistinguishable from a deletion.
+    t = YTMusicBrowserTarget.__new__(YTMusicBrowserTarget)
+    t._api = type("A", (), {"get_playlist": lambda self, pid, limit=None: {"tracks": [
+        {"videoId": "v1", "setVideoId": "s1", "title": "Linger", "duration_seconds": 267,
+         "artists": [{"name": "The Cranberries - Topic"}]},
+        {"videoId": "v2", "setVideoId": "s2", "title": "Linger", "duration_seconds": 267,
+         "artists": [{"name": "The Cranberries"}]},
+    ]}})()
+    a, b = t.playlist_tracks({"playlistId": "p1"})
+    assert a["artist"] == b["artist"] == "The Cranberries"
+    assert a["artists"] == b["artists"] == ["The Cranberries"]

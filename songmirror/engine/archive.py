@@ -64,6 +64,21 @@ CREATE TABLE IF NOT EXISTS playlist_state (
     PRIMARY KEY (playlist, source, canonical_id)
 )
 """,
+    # The last HARD canonical id (ISRC / Spotify-linked) a provider's track
+    # resolved to. Provider metadata is mutable: YouTube's youtubei read
+    # alternates between a track's artist and its auto-generated channel for the
+    # same video, and a re-keyed entry is indistinguishable from a deletion. So
+    # once a physical entry has earned a hard identity it keeps it, even when a
+    # later read is too degraded to derive one. See targets/base.py.
+    """
+CREATE TABLE IF NOT EXISTS track_identity (
+    source       TEXT NOT NULL,
+    track_id     TEXT NOT NULL,
+    canonical_id TEXT NOT NULL,
+    updated      TEXT NOT NULL,
+    PRIMARY KEY (source, track_id)
+)
+""",
     # Ordered per-provider snapshots of each playlist, kept as a short history.
     # A recovery / forensics trail (what did this playlist look like, in order,
     # and when) — the sync logic itself never reads these back.
@@ -191,6 +206,22 @@ def get_isrcs(conn, source, ids):
         conn, "SELECT id, isrc FROM songs WHERE source = ? AND isrc IS NOT NULL AND id IN ({marks})",
         [source], ids)
     return {k: v for k, v in got.items() if v}
+
+
+def get_identities(conn, source, track_ids):
+    """{track_id: canonical_id} recorded for this provider's existing tracks."""
+    return _in_chunks(
+        conn, "SELECT track_id, canonical_id FROM track_identity WHERE source = ? "
+              "AND track_id IN ({marks})", [source], track_ids)
+
+
+def set_identities(conn, source, mapping):
+    """Remember what each track resolved to. Only hard ids are ever stored, so a
+    later degraded read yields to the identity the entry already earned."""
+    rows = [(source, tid, cid, _now()) for tid, cid in mapping.items() if tid and cid]
+    if rows:
+        conn.executemany("INSERT OR REPLACE INTO track_identity VALUES (?, ?, ?, ?)", rows)
+        conn.commit()
 
 
 ORDER_HISTORY_KEEP = 12

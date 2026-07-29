@@ -285,30 +285,54 @@ def _entry_cids(target, tracks, songs, cache, key2isrc):
 
     Canonical precedence: ISRC (direct / provider-native map / same-playlist
     Spotify track_key) -> ISRC via the reverse link to Spotify -> the Spotify id
-    -> track_key. Getting the same song onto ONE canonical id across providers
-    is the crux, so ISRC is pulled from wherever each provider exposes it:
-    Spotify carries it inline; Apple's ISRC resolve cache maps catalog_id ->
-    ISRC; and key2isrc (built from this playlist's Spotify tracks) rescues any
-    remaining track whose fuzzy key already exists on Spotify — without it, an
-    ISRC-less YT copy of a Spotify song splits into a duplicate."""
+    -> the identity this same entry earned on an earlier pass -> track_key.
+    Getting the same song onto ONE canonical id across providers is the crux, so
+    ISRC is pulled from wherever each provider exposes it: Spotify carries it
+    inline; Apple's ISRC resolve cache maps catalog_id -> ISRC; and key2isrc
+    (built from this playlist's Spotify tracks) rescues any remaining track whose
+    fuzzy key already exists on Spotify. Without it, an ISRC-less YT copy of a
+    Spotify song splits into a duplicate.
+
+    The remembered identity is what makes a physical entry's id STICKY. Every
+    softer step above reads provider metadata, and that metadata is mutable:
+    YouTube's youtubei playlist read alternates, for one unchanging video,
+    between the track's artist and its auto-generated "<artist> - Topic" channel,
+    sometimes the generic "Release - Topic", which names no artist at all. Each
+    flip re-keys the entry from its ISRC down to a fuzzy key, which the merge
+    cannot tell apart from the user deleting the song. A hard id computed now
+    always wins and refreshes the memory, so a wrong binding self-corrects on the
+    next good read; the memory only covers for a read too degraded to derive
+    one."""
+    ids = [target.track_id(t) for t in tracks]
     rev = ({} if target.source == "spotify"
-           else archive.get_reverse_links(songs, target.source, [target.track_id(t) for t in tracks]))
+           else archive.get_reverse_links(songs, target.source, ids))
     sp_isrc = archive.get_isrcs(songs, "spotify", list(rev.values())) if rev else {}
     id2isrc = target.native_isrc_map(cache)  # provider-supplied track_id -> ISRC (Apple, future providers)
-    out = []
+    known = archive.get_identities(songs, target.source, ids)
+    out, learned = [], {}
     for t in tracks:
         norm = _normalize(t, target.source)
-        isrc = (norm["isrc"] or id2isrc.get(target.track_id(t))
-                or key2isrc.get(track_key(norm["name"], norm["artist"])))
+        tid = target.track_id(t)
+        # The joined credit is the most specific key, so it decides first; the
+        # per-artist variants are only a fallback for a peer that credits a
+        # subset, or transliterates a name differently.
+        keys = [track_key(norm["name"], norm["artist"]), *sorted(spotify_track_keys(norm))]
+        isrc = norm["isrc"] or id2isrc.get(tid) or next(
+            (key2isrc[k] for k in keys if k in key2isrc), None)
         if isrc:
             cid = f"i:{isrc}"
         else:
-            sp_id = rev.get(target.track_id(t))
+            sp_id = rev.get(tid)
             if sp_id:
                 cid = f"i:{sp_isrc[sp_id]}" if sp_id in sp_isrc else f"s:{sp_id}"
             else:
                 cid = f"k:{track_key(norm['name'], norm['artist'])}"
+        if cid.startswith("k:"):
+            cid = known.get(tid, cid)       # yield to whatever this entry already earned
+        elif tid and known.get(tid) != cid:
+            learned[tid] = cid              # only hard ids are worth remembering
         out.append((cid, norm))
+    archive.set_identities(songs, target.source, learned)
     return out
 
 
@@ -434,7 +458,11 @@ def reconcile(peers, name, playlists, caches, songs, *, execute, max_removals, m
         canon[p.source] = fold
         for cid, norm in per_entry[p.source]:
             if cid.startswith("i:"):  # any provider that resolved an ISRC anchors the rest
-                key2isrc.setdefault(track_key(norm["name"], norm["artist"]), cid[2:])
+                # Every key the song answers to, not just the joined credit: a peer
+                # that lists one artist of several, or spells a transliterated name
+                # differently, still lands on the ISRC instead of splitting off.
+                for k in spotify_track_keys(norm):
+                    key2isrc.setdefault(k, cid[2:])
 
     # One identity per song: fold provider-flavored aliases together BEFORE any
     # membership math, and map the stored baseline through the same table so a

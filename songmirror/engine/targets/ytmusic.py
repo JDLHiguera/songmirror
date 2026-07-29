@@ -124,7 +124,11 @@ def _parse_count(value):
 
 
 def _artist_from_channel(channel):
-    """'The Cranberries - Topic' -> 'The Cranberries'; VEVO/plain kept as-is."""
+    """'The Cranberries - Topic' -> 'The Cranberries'; VEVO/plain kept as-is.
+
+    Both YT readers run every artist through this because the two shapes name the
+    SAME artist, and YouTube serves them interchangeably for one unchanging
+    video. Leaving them apart makes a track's identity flap between passes."""
     return _TOPIC_RE.sub("", channel or "").strip()
 
 
@@ -405,7 +409,8 @@ class YTMusicBrowserTarget(YTMusicTarget):
             vid = t.get("videoId")
             if not vid:
                 continue
-            artists = [a.get("name", "") for a in (t.get("artists") or []) if a.get("name")]
+            artists = [a for a in (_artist_from_channel(x.get("name", ""))
+                                   for x in (t.get("artists") or [])) if a]
             album = t.get("album")
             ds = t.get("duration_seconds")
             tracks.append({

@@ -7,7 +7,7 @@ import tempfile
 
 from songmirror.engine import archive
 from songmirror.engine.matching import spotify_track_keys
-from songmirror.engine.targets.base import _merge, reconcile
+from songmirror.engine.targets.base import _entry_cids, _merge, reconcile
 
 
 # --- merge: the safety-critical set logic (per-provider prev + cur) ----------
@@ -348,6 +348,70 @@ def test_alias_flip_never_removes_the_real_track(tmp_path):
                       execute=True, max_removals=25, max_adds=200)
     assert stats["removed"] == 0 and ap.removed == [] and yt.removed == []
     assert stats["added"] == 0
+    conn.close()
+
+
+def test_degraded_artist_read_never_removes_the_real_track(tmp_path):
+    # YouTube serves one unchanging video with either its artist or its
+    # auto-generated channel, and for the generic "Release - Topic" channel there
+    # is no artist left to match on: too little overlap for alias unification to
+    # fold it back. The entry's canonical then drops from the ISRC it shares with
+    # the other providers to a fuzzy key, which reads as a user deletion and
+    # deletes a song all three services still have. Sticky per-entry identity
+    # pins the entry to the id it already earned.
+    conn = archive.connect(str(tmp_path / "s.db"))
+    name = "Can't Behave"
+
+    def peer(source, artist, isrc):
+        return _VariantPeer(source, {"id": f"{source}-lib", "name": name, "artists": [artist],
+                                     "artist": artist, "duration_ms": 213000, "isrc": isrc,
+                                     "added_at": "2020"}, f"{source}-cat")
+
+    sp = peer("spotify", "Courtney Jaye", "USIR20500202")
+    ap, yt = peer("apple", "Courtney Jaye", None), peer("ytmusic", "Courtney Jaye", None)
+    peers = [sp, ap, yt]
+    args = ({p.source: {"id": p.source} for p in peers}, _caches("spotify", "apple", "ytmusic"), conn)
+    reconcile(peers, "Mix", *args, execute=True, max_removals=25, max_adds=200)
+    assert archive.get_playlist_state(conn, "mix", "ytmusic") == {"i:USIR20500202"}
+
+    yt._track["artists"], yt._track["artist"] = ["Release"], "Release"  # the degraded read
+    stats = reconcile(peers, "Mix", *args, execute=True, max_removals=25, max_adds=200)
+    assert stats["removed"] == 0 and sp.removed == [] and ap.removed == [] and yt.removed == []
+    assert stats["added"] == 0                       # nor a phantom re-add of the "missing" copy
+    assert archive.get_playlist_state(conn, "mix", "ytmusic") == {"i:USIR20500202"}
+    conn.close()
+
+
+def test_a_subset_credit_earns_a_hard_id_worth_remembering(tmp_path):
+    # Providers credit differently: Spotify lists every artist, YT often just one.
+    # Alias unification already folds that copy in, but it folds too late to be
+    # remembered: only a hard id from _entry_cids is. Seeding the ISRC under
+    # every key the song answers to (not just the joined credit) is what lets the
+    # entry survive a later read too degraded to match on anything.
+    conn = archive.connect(str(tmp_path / "s.db"))
+    sp = _VariantPeer("spotify", {"id": "sp-lib", "name": "Hona Tha Pyar",
+                                  "artists": ["Atif Aslam", "Hadiqa Kiani"],
+                                  "artist": "Atif Aslam, Hadiqa Kiani", "duration_ms": 300000,
+                                  "isrc": "INT101100022", "added_at": "2020"}, "sp-cat")
+    yt = _VariantPeer("ytmusic", {"id": "yt-lib", "name": "Hona Tha Pyar", "artists": ["Hadiqa Kiani"],
+                                  "artist": "Hadiqa Kiani", "duration_ms": 300000,
+                                  "isrc": None, "added_at": "2020"}, "yt-cat")
+    stats = reconcile([sp, yt], "Mix", {p.source: {"id": p.source} for p in (sp, yt)},
+                      _caches("spotify", "ytmusic"), conn, execute=True, max_removals=25, max_adds=200)
+    assert stats["added"] == 0 and stats["removed"] == 0
+    assert archive.get_identities(conn, "ytmusic", ["yt-lib"]) == {"yt-lib": "i:INT101100022"}
+    conn.close()
+
+
+def test_a_fresh_hard_id_overrides_a_remembered_one(tmp_path):
+    # The memory must not calcify a wrong binding: whenever a read is good enough
+    # to derive an ISRC/link identity, that wins and replaces what was stored.
+    conn = archive.connect(str(tmp_path / "s.db"))
+    archive.set_identities(conn, "apple", {"ap-lib": "i:WRONG"})
+    ap = _VariantPeer("apple", {"id": "ap-lib", "name": "Song", "artists": ["A"], "artist": "A",
+                                "duration_ms": 1000, "isrc": "RIGHT", "added_at": "2020"}, "ap-cat")
+    assert [cid for cid, _ in _entry_cids(ap, ap.playlist_tracks(None), conn, {}, {})] == ["i:RIGHT"]
+    assert archive.get_identities(conn, "apple", ["ap-lib"]) == {"ap-lib": "i:RIGHT"}
     conn.close()
 
 
