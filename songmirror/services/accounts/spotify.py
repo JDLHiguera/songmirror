@@ -56,13 +56,23 @@ class SpotifyConnector(Connector):
         return bool(self._store.get("SPOTIFY_ISRC_CLIENTS") or os.getenv("SPOTIFY_ISRC_CLIENTS"))
 
     def status(self) -> ConnStatus:
+        from ...engine import spotify
+
         if not self._configured("SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_SECRET"):
             return ConnStatus("unconfigured")
         note = ((" · cookie writes" if self._cookie_on() else "")
                 + (" · ISRC app" if self._isrc_app_on() else ""))
-        if os.path.exists(self._token_cache()):
-            return ConnStatus("connected", "token present" + note)
-        return ConnStatus("unconfigured", "not authorized yet")
+        if not os.path.exists(self._token_cache()):
+            return ConnStatus("unconfigured", "not authorized yet")
+        # A configured-but-refused ISRC app is the one failure the OAuth token can't
+        # reveal: it's a different app on a different grant, and the sync degrades to
+        # slow single-track lookups without anything else going red. Cached upstream,
+        # since this method answers a polled endpoint.
+        problem = spotify.isrc_app_problem()
+        if problem:
+            return ConnStatus("error", f"the ISRC lookup app is refused because {problem}. Syncs continue "
+                                       "on slower single-track lookups (about 300 tracks a day).")
+        return ConnStatus("connected", "token present" + note)
 
     def set_isrc_app(self, client_id: str, client_secret: str) -> ConnStatus:
         """Store a batch-capable app's credentials for the ISRC /tracks lookup that
@@ -70,8 +80,10 @@ class SpotifyConnector(Connector):
         a rate bucket SEPARATE from the OAuth user token and the cookie token — so ISRC
         never hits the per-account penalty box. Validate by minting a token and
         confirming the BATCH endpoint works (a Development-Mode app 403s there and needs
-        Extended Quota Mode)."""
+        Extended Quota Mode; an app whose owner has no active Premium is refused outright)."""
         import requests
+
+        from ...engine import spotify
 
         client_id, client_secret = (client_id or "").strip(), (client_secret or "").strip()
         if not client_id or not client_secret:
@@ -88,19 +100,20 @@ class SpotifyConnector(Connector):
                 headers={"Authorization": f"Bearer {tok.json()['access_token']}"}, timeout=20)
         except Exception as e:
             return ConnStatus("error", f"could not validate the ISRC app ({e!r})")
-        if probe.status_code == 403:
-            return ConnStatus(
-                "error", "that app 403s on the batch /tracks endpoint — it needs Extended Quota Mode "
-                         "(request it on the app's page at developer.spotify.com)")
-        if probe.status_code not in (200, 429):
-            return ConnStatus("error", f"unexpected response validating the ISRC app ({probe.status_code})")
+        problem = spotify.tracks_probe_problem(probe.status_code, probe.text)
+        if problem:
+            return ConnStatus("error", f"that app can't do the batch /tracks lookup because {problem}")
         self._store.save({"SPOTIFY_ISRC_CLIENTS": f"{client_id}:{client_secret}"})
+        spotify.clear_isrc_probe_cache()
         return ConnStatus("connected", "ISRC app configured")
 
     def clear_isrc_app(self) -> ConnStatus:
-        """Drop the ISRC app; N-way matching falls back to the OAuth app for /tracks
-        (which works only if that app also has extended quota)."""
+        """Drop the ISRC app; ISRC lookups fall back to the primary app one track at a
+        time, which a Development-Mode app can serve but only ~300 times a day."""
+        from ...engine import spotify
+
         self._store.save({"SPOTIFY_ISRC_CLIENTS": ""})
+        spotify.clear_isrc_probe_cache()
         return self.status()
 
     def enable_cookie(self, sp_dc: str) -> ConnStatus:

@@ -908,6 +908,11 @@ function IsrcAppSection({ account, onChanged }: { account: Account; onChanged: (
           ISRCs for bidirectional (N-way) matching. Its token reads on a rate limit separate from your main app, so
           ISRC lookups never stall the sync. Only N-way needs it — one-way mirroring and transfers don't.
         </p>
+        <p className="text-xs leading-relaxed text-text-3">
+          Without one, N-way still runs: your main app looks ISRCs up one track at a time instead, which is slower
+          and capped at roughly 300 new tracks a day. Extended Quota Mode also requires the owning account to keep
+          an active Premium subscription — Spotify refuses the app outright if it lapses.
+        </p>
 
         {error && <p className="text-xs text-danger">{error}</p>}
 

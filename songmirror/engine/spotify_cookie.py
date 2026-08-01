@@ -236,10 +236,16 @@ def _track_isrcs(ids):
         EXTENDED-QUOTA app does the 50-ids batch — a whole library in ~len/50 calls. The
         SPOTIFY_ISRC_CLIENTS pool supplies batch-capable app creds.
 
-    Fail-over then fail-CLOSED: a 429 rotates to the next pool app; when the last app 429s it
-    raises, so an N-way sync read fails closed rather than matching blind. No retry INTO a
-    429 on the same app (that's what earns a penalty box). With the DB cache (playlist_tracks'
-    known_isrc), steady-state fetches trend to zero."""
+    Three outcomes per batch, and the distinction between the last two is the point:
+      • 429 rotates to the next pool app; when the LAST app 429s it raises, so the sync
+        fails closed rather than matching blind. No retry INTO a 429 on the same app
+        (that's what earns a penalty box).
+      • 403 means that app cannot serve this endpoint at all, which is not something a
+        retry or a wait fixes. Every pool app is tried, then _isrc_singles carries the
+        batch. A refused app must not take the sync down: an expired Premium on the
+        pool app's owner account, or no extended-quota app at all, is a slower path,
+        not a broken one.
+    With the DB cache (playlist_tracks' known_isrc), steady-state fetches trend to zero."""
     from . import spotify
     want = [i for i in dict.fromkeys(ids) if i and i not in _isrc_cache]
     napps = spotify.isrc_app_count()
@@ -249,6 +255,8 @@ def _track_isrcs(ids):
             r = requests.get(f"{_API}/tracks", params={"ids": ",".join(chunk)},
                              headers={"Authorization": f"Bearer {spotify.app_token(app_idx)}", "User-Agent": _UA},
                              timeout=REQUEST_TIMEOUT)
+            if r.status_code == 403:
+                continue   # this app can't batch at all: next app, then the single fallback
             if r.status_code == 429 and app_idx < napps - 1:
                 continue   # this app is rate-limited — fail over to the next pool app
             r.raise_for_status()   # last-app 429 / other error -> HTTPError -> fail-closed upstream
@@ -256,9 +264,54 @@ def _track_isrcs(ids):
                 if t:
                     _isrc_cache[t["id"]] = (t.get("external_ids") or {}).get("isrc")
             break
+        else:
+            _isrc_singles(chunk)   # every app refused the batch endpoint
         if i + 50 < len(want):
             polite_sleep(0.5)   # space multi-batch backfills; a single-batch pass doesn't sleep
     return {i: _isrc_cache.get(i) for i in ids}
+
+
+_singles_warned = False   # the degraded-path warning is once per process, not per batch
+_singles_used = 0         # tracks served by the degraded path, drained per pass
+
+
+def take_singles_used():
+    """How many tracks the per-track ISRC path served since the last read, and
+    resets. The runner drains this into the pass summary so the dashboard can say
+    the sync is on the slow path and how much of the daily budget it spent. A
+    counter rather than a return value because the lookup sits several layers
+    inside a provider read, with nothing summary-shaped to thread it back through."""
+    global _singles_used
+    n, _singles_used = _singles_used, 0
+    return n
+
+
+def _isrc_singles(ids):
+    """Fill the ISRC cache one track at a time via /tracks/{id} with the PRIMARY app's
+    token. That endpoint is not behind the Development-Mode gate, so it still answers
+    when every pool app is refused on the batch endpoint.
+
+    ponytail: one call per track against a dev-mode app's ~300/24h budget, and no cap
+    of its own. The budget holds because only tracks the songs DB has never seen reach
+    here; a first-run backfill of a large library will exhaust it and 429, which raises
+    and fails the sync closed. Connecting an extended-quota ISRC app restores batching
+    and lifts the ceiling."""
+    from . import spotify
+
+    global _singles_warned, _singles_used
+    if not _singles_warned:
+        _singles_warned = True
+        log_warn("batch ISRC lookup refused; falling back to one call per track. Connect an "
+                 "extended-quota ISRC lookup app (Accounts > Spotify) to restore batching.",
+                 tag="spotify")
+    for tid in ids:
+        r = requests.get(f"{_API}/tracks/{tid}",
+                         headers={"Authorization": f"Bearer {spotify.main_app_token()}", "User-Agent": _UA},
+                         timeout=REQUEST_TIMEOUT)
+        r.raise_for_status()   # includes a 429 once the daily budget is spent -> fail closed
+        _isrc_cache[tid] = (r.json().get("external_ids") or {}).get("isrc")
+        _singles_used += 1     # counted per call actually spent, not per track asked for
+        polite_sleep(0.2)
 
 
 def playlist_tracks(playlist, require_isrc=False, known_isrc=None):

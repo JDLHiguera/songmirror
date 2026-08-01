@@ -43,32 +43,52 @@ def _retry(fn, what, attempts=5):
             time.sleep(wait)
 
 
-_app_tokens = {}  # client_id -> {"token", "expires_at"}
+_API = "https://api.spotify.com/v1"   # official REST, reached directly only for the ISRC probe
+
+_app_tokens = {}   # client_id -> {"token", "expires_at"}
+_isrc_problem = {}  # client_id -> (checked_at, problem|None), see isrc_app_problem
+
+# Any catalog track: the probe reads only the status code, never the payload.
+_PROBE_TRACK = "6pHtgTMzsmP6ccN2ocv7XN"
+# How long an ISRC-app verdict is trusted. The accounts endpoint is polled, so an
+# uncached probe would put an HTTPS round trip on every poll.
+ISRC_PROBE_TTL = 900
 
 
-def _isrc_apps():
-    """[(client_id, secret)] for ISRC catalog reads — the SPOTIFY_ISRC_CLIENTS pool
-    ("id:secret,id:secret", set by the connect wizard's ISRC-app section), else the
-    main SPOTIFY_CLIENT_ID/SECRET. An app (client-credentials) token reads /tracks on a
-    rate bucket SEPARATE from the OAuth user token and the web-player cookie token; the
-    pool lets a rate-limited app fail over to the next (see spotify_cookie._track_isrcs).
-    Read fresh each call so a wizard change takes effect without a restart."""
+def _main_app():
+    """The primary (OAuth) app's credentials. Doubles as the ISRC fallback: a
+    Development-Mode app is refused on the batch /tracks endpoint but still serves
+    /tracks/{id}, so it can carry ISRC lookups when no pool app can."""
+    return (required_env("SPOTIFY_CLIENT_ID"), required_env("SPOTIFY_CLIENT_SECRET"))
+
+
+def _isrc_pool():
+    """[(client_id, secret)] parsed from the SPOTIFY_ISRC_CLIENTS pool
+    ("id:secret,id:secret", set by the connect wizard's ISRC-app section); empty when
+    none is configured. Read fresh each call so a wizard change takes effect without
+    a restart."""
     pool = []
     for pair in (os.getenv("SPOTIFY_ISRC_CLIENTS") or "").split(","):
         cid, _, sec = pair.strip().partition(":")
         if cid and sec:
             pool.append((cid, sec))
-    return pool or [(required_env("SPOTIFY_CLIENT_ID"), required_env("SPOTIFY_CLIENT_SECRET"))]
+    return pool
+
+
+def _isrc_apps():
+    """Which apps to try for ISRC catalog reads, best first. An app
+    (client-credentials) token reads /tracks on a rate bucket SEPARATE from the OAuth
+    user token and the web-player cookie token; the pool lets a rate-limited app fail
+    over to the next (see spotify_cookie._track_isrcs)."""
+    return _isrc_pool() or [_main_app()]
 
 
 def isrc_app_count():
     return len(_isrc_apps())
 
 
-def app_token(index=0):
-    """Client-credentials bearer for the ISRC app pool[index]. Cached per client_id
-    until ~1 min before expiry. Callers rotate `index` to fail over on a 429."""
-    cid, sec = _isrc_apps()[index % len(_isrc_apps())]
+def _token(cid, sec):
+    """Client-credentials bearer, cached per client_id until ~1 min before expiry."""
     cached = _app_tokens.get(cid)
     now = time.time()
     if cached and now < cached["expires_at"] - 60:
@@ -81,6 +101,65 @@ def app_token(index=0):
     body = r.json()
     _app_tokens[cid] = {"token": body["access_token"], "expires_at": now + int(body.get("expires_in", 3600))}
     return _app_tokens[cid]["token"]
+
+
+def app_token(index=0):
+    """Bearer for the ISRC app pool[index]. Callers rotate `index` to fail over."""
+    apps = _isrc_apps()
+    return _token(*apps[index % len(apps)])
+
+
+def main_app_token():
+    """Bearer for the primary app, the single-track ISRC fallback's token."""
+    return _token(*_main_app())
+
+
+def tracks_probe_problem(status, body):
+    """None when a client-credentials app can serve the BATCH /tracks?ids endpoint,
+    else a short reason phrased to slot into a sentence.
+
+    Two unrelated failures both answer 403 here, and telling them apart is the
+    difference between "renew a subscription" and "request Extended Quota Mode".
+    Spotify cuts off an app whose OWNER's Premium has lapsed on EVERY endpoint and
+    says so in a plain-text body; a Development-Mode app is refused only on the batch
+    endpoint and answers with the usual JSON error envelope."""
+    if status in (200, 429):   # 429 means reachable, just rate-limited
+        return None
+    if status == 403 and "premium" in (body or "").lower():
+        return "its owner account no longer has an active Spotify Premium subscription"
+    if status == 403:
+        return "it needs Extended Quota Mode (request it on the app's page at developer.spotify.com)"
+    return f"Spotify answered {status}"
+
+
+def isrc_app_problem():
+    """Why the configured ISRC app can't serve batch /tracks, or None when it can.
+    Also None when no ISRC app is configured, since there is nothing the user set up
+    to be broken; the primary app's single-track fallback covers that case.
+
+    Cached per client_id for ISRC_PROBE_TTL so a polled status endpoint stays cheap."""
+    pool = _isrc_pool()
+    if not pool:
+        return None
+    cid, sec = pool[0]
+    hit = _isrc_problem.get(cid)
+    now = time.time()
+    if hit and now - hit[0] < ISRC_PROBE_TTL:
+        return hit[1]
+    try:
+        r = requests.get(f"{_API}/tracks", params={"ids": _PROBE_TRACK},
+                         headers={"Authorization": f"Bearer {_token(cid, sec)}"}, timeout=REQUEST_TIMEOUT)
+        problem = tracks_probe_problem(r.status_code, r.text)
+    except Exception as e:
+        problem = f"Spotify could not be reached to check it ({e!r})"
+    _isrc_problem[cid] = (now, problem)
+    return problem
+
+
+def clear_isrc_probe_cache():
+    """Drop cached verdicts so a just-saved or just-cleared ISRC app is re-checked
+    on the next status read instead of after ISRC_PROBE_TTL."""
+    _isrc_problem.clear()
 
 
 def client(writable=False):

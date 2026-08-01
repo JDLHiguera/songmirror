@@ -82,10 +82,27 @@ export interface TargetSummary {
   removals_skipped: number
   created: number
   skipped: number
+  /** Playlists this pass could not sync. The pass carries on past each one, so
+   * `ok` stays true and this count is the only thing separating it from a clean
+   * pass. Absent on passes recorded before this was reported. */
+  failed?: number
+  /** Tracks whose ISRC had to be looked up one call at a time, because no
+   * extended-quota app could serve the batch endpoint. Non-zero means the pass
+   * ran on the slow, daily-capped path. */
+  isrc_fallback?: number
   /** Which tracks the cap kept, and why. Bounded by the backend, so it can be
    * shorter than `removals_skipped` — that count remains the total. Absent on
    * passes recorded before this was reported. */
   held_removals?: HeldRemoval[]
+  /** Which playlists failed and why. Bounded by the backend, so it can be shorter
+   * than `failed` — that count remains the total. */
+  failures?: PassFailure[]
+}
+
+/** One playlist a pass gave up on, with the error that stopped it. */
+export interface PassFailure {
+  playlist: string
+  error: string
 }
 
 /** One track a removal cap kept, named with the playlist and service it would

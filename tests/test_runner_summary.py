@@ -210,3 +210,46 @@ def test_summary_entry_carries_detail_and_defaults_it_empty():
     assert runner._summary_entry("N-way", {})["held_removals"] == []
     entry = runner._summary_entry("N-way", {"held_removals": [{"track": "x"}]})
     assert entry["held_removals"] == [{"track": "x"}]
+
+
+class _Peer:
+    """Minimal N-way peer: every playlist exists, is editable, and needs no create."""
+
+    def __init__(self, source):
+        self.source, self.name, self.tag = source, source.title(), source
+        self.cache_file = ""
+
+    def list_playlists(self):
+        return {"aurora": {"id": f"{self.source}-aurora"}}
+
+    def is_editable(self, pl):
+        return True
+
+
+def test_nway_counts_and_names_a_playlist_it_could_not_sync(monkeypatch):
+    # A reconcile that raises is caught so the remaining playlists still run, which
+    # leaves the pass ok=True. The count and the reason are what stop that from
+    # reading as a clean pass in the dashboard.
+    monkeypatch.setattr(runner, "build_peers", lambda opts, sp, songs=None: [_Peer("spotify"), _Peer("apple")])
+    monkeypatch.setattr(runner, "load_cache", lambda f: {})
+    monkeypatch.setattr(runner, "save_cache", lambda f, c: None)
+
+    def boom(*a, **kw):
+        raise RuntimeError("403 Client Error: Forbidden for url: .../v1/tracks?ids=7HFA")
+
+    monkeypatch.setattr(runner, "reconcile", boom)
+    entry = runner._run_nway(_opts(sync_mode="nway", execute=True), object(),
+                             [{"name": "Aurora"}], _FakeSongs())[0]
+
+    assert entry["failed"] == 1
+    assert entry["failures"] == [{"playlist": "Aurora",
+                                  "error": "403 Client Error: Forbidden for url: .../v1/tracks?ids=7HFA"}]
+    assert entry["added"] == 0 and entry["removed"] == 0
+
+
+def test_failure_detail_is_bounded_but_the_count_is_not():
+    counts, dest = {"failed": 0}, []
+    for i in range(runner.FAILURE_DETAIL + 5):
+        runner._collect_failure(counts, dest, f"p{i}", RuntimeError("nope"))
+    assert counts["failed"] == runner.FAILURE_DETAIL + 5   # total is never truncated
+    assert len(dest) == runner.FAILURE_DETAIL

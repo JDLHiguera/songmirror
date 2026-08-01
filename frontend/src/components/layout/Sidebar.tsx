@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, NavLink } from 'react-router-dom'
 import {
   LuArrowLeftRight,
+  LuGithub,
   LuLayoutDashboard,
   LuLink2,
   LuListMusic,
@@ -17,6 +18,8 @@ import type { IconType } from 'react-icons'
 import songmirrorMark from '@/assets/brand/songmirror-mark.png'
 import { useSidebarCollapsed } from '@/hooks/useSidebarCollapsed'
 import { cn } from '@/lib/cn'
+
+const REPO_URL = 'https://github.com/ahnafnafee/songmirror'
 
 const NAV_ITEMS: Array<{ to: string; label: string; end: boolean; icon: IconType }> = [
   { to: '/', label: 'Dashboard', end: true, icon: LuLayoutDashboard },
@@ -137,6 +140,11 @@ export function Sidebar() {
             </NavLink>
           ))}
         </nav>
+
+        {/* The nav above takes flex-1, so this sits on the rail's bottom edge. */}
+        <div className="shrink-0 border-t border-border p-3">
+          <RepoLink />
+        </div>
         </div>
       </aside>
 
@@ -186,9 +194,31 @@ export function Sidebar() {
               {item.label}
             </NavLink>
           ))}
+          <div className="mt-2 border-t border-border pt-3">
+            <RepoLink />
+          </div>
         </nav>
       )}
     </>
+  )
+}
+
+/** Source link, centered on the sidebar's bottom edge. Icon-only in both rail
+ * widths, so collapsing the rail doesn't change it. */
+function RepoLink() {
+  return (
+    <div className="flex items-center justify-center">
+      <a
+        href={REPO_URL}
+        target="_blank"
+        rel="noreferrer"
+        title="SongMirror on GitHub"
+        aria-label="SongMirror on GitHub"
+        className="flex size-9 items-center justify-center rounded-control text-text-3 transition-colors duration-fast hover:bg-surface-2 hover:text-text"
+      >
+        <LuGithub className="size-[18px]" aria-hidden="true" />
+      </a>
+    </div>
   )
 }
 

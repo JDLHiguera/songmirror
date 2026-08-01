@@ -13,6 +13,11 @@ const STORAGE_KEY = 'songmirror-dismissed-alerts'
  * into a track listing; the remainder is reported as a count. */
 const HELD_REMOVAL_PREVIEW = 6
 
+/** Fewer than the held-removal preview: a failure line carries a whole error
+ * message, and a pass that fails several playlists usually fails them all for the
+ * same reason, which the first few already name. */
+const FAILURE_PREVIEW = 4
+
 interface NeedsLookItem {
   key: string
   icon: IconType
@@ -63,6 +68,38 @@ function buildItems(accounts: Account[] | null, status: SyncStatus | null): Need
       icon: LuCircleAlert,
       title: 'The last pass failed',
       description: status.last.error || "It didn't complete successfully. The services it reached are unaffected.",
+    })
+  }
+
+  // A pass carries on past a playlist it can't sync, so `ok` stays true and this is
+  // the only place that failure surfaces after the live feed has scrolled away.
+  const failedTotal = status?.last?.per_target.reduce((sum, t) => sum + (t.failed ?? 0), 0) ?? 0
+  if (failedTotal > 0) {
+    const listed = status?.last?.per_target.flatMap((t) => t.failures ?? []) ?? []
+    const details = listed.slice(0, FAILURE_PREVIEW).map((f) => `${f.playlist}: ${f.error}`)
+    if (listed.length > details.length) {
+      details.push(`+${listed.length - details.length} more`)
+    }
+    items.push({
+      key: 'playlists-failed',
+      icon: LuCircleAlert,
+      title: `${failedTotal} playlist${failedTotal === 1 ? '' : 's'} failed to sync`,
+      description: 'The rest of the pass finished. These were left exactly as they were and are retried next pass.',
+      details,
+    })
+  }
+
+  const isrcFallback = status?.last?.per_target.reduce((sum, t) => sum + (t.isrc_fallback ?? 0), 0) ?? 0
+  if (isrcFallback > 0) {
+    items.push({
+      key: 'isrc-fallback',
+      icon: LuTriangleAlert,
+      title: `${isrcFallback} ISRC lookup${isrcFallback === 1 ? '' : 's'} ran on the slow path`,
+      description:
+        'No extended-quota ISRC app could serve the batch endpoint, so cross-service matching looked these up ' +
+        'one call at a time. That path is capped at roughly 300 tracks a day, and the sync stops rather than ' +
+        'guess once it runs out. Connect one to restore 50-per-call batching.',
+      action: { label: 'Connect app', to: '/accounts' },
     })
   }
 

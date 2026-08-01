@@ -47,12 +47,17 @@ def save_cache(cache_file, cache):
         json.dump({"isrc": cache["isrc"], "search": cache["search"]}, f, indent=1)
 
 
-_SUMMARY_KEYS = ("added", "removed", "missing", "held", "deferred", "removals_skipped", "created", "skipped")
+_SUMMARY_KEYS = ("added", "removed", "missing", "held", "deferred", "removals_skipped",
+                 "created", "skipped", "failed", "isrc_fallback")
 
 
 # How many held-back removals travel with a pass summary. The counts above stay
 # authoritative for the total; this only bounds what the UI can list.
 HELD_REMOVAL_DETAIL = 50
+
+# Same bound for failed playlists. Smaller because a pass that fails this many is
+# failing for one shared reason, which the first few already name.
+FAILURE_DETAIL = 20
 
 
 def _collect_held(dest, records):
@@ -61,11 +66,21 @@ def _collect_held(dest, records):
         dest.extend(records[:room])
 
 
+def _collect_failure(counts, dest, playlist, exc):
+    """Record a playlist the pass could not sync. A pass keeps going past one of
+    these, so the count is the only thing that distinguishes it from a clean pass,
+    and the reason is the only thing that makes the count actionable."""
+    counts["failed"] += 1
+    if len(dest) < FAILURE_DETAIL:
+        dest.append({"playlist": playlist, "error": str(exc) or repr(exc)})
+
+
 def _summary_entry(name, agg):
     entry = {"name": name}
     for k in _SUMMARY_KEYS:
         entry[k] = agg.get(k, 0)
     entry["held_removals"] = agg.get("held_removals", [])
+    entry["failures"] = agg.get("failures", [])
     return entry
 
 
@@ -101,7 +116,8 @@ def run_target(target, selected, get_source_tracks, songs, opts, links=None, sou
     path (empty `links` => byte-for-byte unchanged when the source is Spotify)."""
     src_key = source.source
     agg = {"name": target.name, "pairs": 0, "added": 0, "removed": 0, "missing": 0,
-           "held": 0, "removals_skipped": 0, "skipped": 0, "created": 0, "held_removals": []}
+           "held": 0, "removals_skipped": 0, "skipped": 0, "created": 0, "failed": 0,
+           "held_removals": [], "failures": []}
     cache = load_cache(target.cache_file)
     try:
         tgt_by_name = target.list_playlists()
@@ -131,6 +147,7 @@ def run_target(target, selected, get_source_tracks, songs, opts, links=None, sou
                     agg["created"] += 1
                     log_note(f"created {target.name} playlist '{name}' (name + description copied)", tag=target.tag)
                 except Exception as e:
+                    _collect_failure(agg, agg["failures"], name, e)
                     log_warn(f"create '{name}' failed: {e!r}", tag=target.tag)
                     continue
 
@@ -163,6 +180,7 @@ def run_target(target, selected, get_source_tracks, songs, opts, links=None, sou
             except TargetAuthError:
                 raise
             except Exception as e:
+                _collect_failure(agg, agg["failures"], name, e)
                 log_warn(f"'{name}' failed, continuing: {e!r}", tag=target.tag)
     finally:
         save_cache(target.cache_file, cache)
@@ -363,10 +381,16 @@ def _run_nway(opts, sp, selected, songs, should_continue=None):
     log(f"  peers: {paint(', '.join(p.name for p in peers), 'cyan')}"
         + (paint(f"   local downloads -> {opts.download_dir}", "grey") if opts.download_dir and opts.execute else ""))
 
+    from . import spotify_cookie
+
+    spotify_cookie.take_singles_used()   # drop any residue from a pass that died mid-read
     dirs = {p.source: p.list_playlists() for p in peers}
     caches = {p.source: load_cache(p.cache_file) for p in peers}
-    total = {"added": 0, "removed": 0, "missing": 0, "held": 0, "deferred": 0, "removals_skipped": 0}
-    held_detail = []  # kept out of `total` so the scalar accumulate loop stays scalar
+    total = {"added": 0, "removed": 0, "missing": 0, "held": 0, "deferred": 0,
+             "removals_skipped": 0, "failed": 0}
+    # Both lists stay out of `total` so the scalar accumulate loop stays scalar.
+    held_detail = []
+    failures = []
     try:
         for sp_playlist in selected:
             if should_continue and should_continue() != "run":
@@ -386,6 +410,7 @@ def _run_nway(opts, sp, selected, songs, should_continue=None):
                     except TargetAuthError:
                         raise
                     except Exception as e:
+                        _collect_failure(total, failures, name, e)
                         log_warn(f"create {p.name} '{name}' failed: {e!r}", tag=p.tag)
                         continue
                 if not p.is_editable(pl):
@@ -407,9 +432,14 @@ def _run_nway(opts, sp, selected, songs, should_continue=None):
             except TargetAuthError:
                 raise
             except Exception as e:
+                _collect_failure(total, failures, name, e)
                 log_warn(f"'{name}' reconcile failed, continuing: {e!r}", tag="sync")
     finally:
         for p in peers:
             save_cache(p.cache_file, caches[p.source])
     total["held_removals"] = held_detail
+    total["failures"] = failures
+    # Only N-way reads request ISRC, so this is the only path that can spend the
+    # degraded per-track budget.
+    total["isrc_fallback"] = spotify_cookie.take_singles_used()
     return [_summary_entry("N-way", total)]

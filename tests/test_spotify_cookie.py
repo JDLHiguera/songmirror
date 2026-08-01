@@ -99,15 +99,75 @@ def test_reads_route_to_cookie_when_enabled(monkeypatch):
 
 
 class _Resp:
-    def __init__(self, status, tracks=None):
-        self.status_code, self._tracks = status, tracks or []
+    def __init__(self, status, tracks=None, body=None, text=""):
+        self.status_code, self._tracks, self._body, self.text = status, tracks or [], body, text
 
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.HTTPError(str(self.status_code))
 
     def json(self):
-        return {"tracks": self._tracks}
+        return self._body if self._body is not None else {"tracks": self._tracks}
+
+
+def test_tracks_probe_problem_separates_premium_from_dev_mode():
+    # Both refusals are a 403; only the body tells them apart, and they need opposite
+    # fixes (renew a subscription vs request Extended Quota Mode).
+    from songmirror.engine import spotify
+
+    assert spotify.tracks_probe_problem(200, "{}") is None
+    assert spotify.tracks_probe_problem(429, "") is None   # reachable, just rate-limited
+    premium = spotify.tracks_probe_problem(
+        403, "Active premium subscription required for the owner of the app.")
+    assert "Premium" in premium
+    dev_mode = spotify.tracks_probe_problem(403, '{"error": {"status": 403, "message": "Forbidden"}}')
+    assert "Extended Quota Mode" in dev_mode
+
+
+def test_track_isrcs_falls_back_to_singles_when_every_app_403s(monkeypatch):
+    # A 403 is a capability refusal, not a rate limit: no pool app can serve the batch
+    # endpoint, so the lookup drops to one /tracks/{id} call per track on the PRIMARY
+    # app (not gated there) instead of taking the sync down.
+    from songmirror.engine import spotify, spotify_cookie as sc
+    sc._isrc_cache.clear()
+    sc._singles_warned = True   # the once-per-process warning is not what's under test
+    monkeypatch.setattr(spotify, "isrc_app_count", lambda: 2)
+    monkeypatch.setattr(spotify, "app_token", lambda index=0: f"POOL{index}")
+    monkeypatch.setattr(spotify, "main_app_token", lambda: "MAIN")
+    monkeypatch.setattr(sc, "polite_sleep", lambda *_: None)
+    calls = []
+
+    def fake_get(url, params=None, headers=None, timeout=None, **kw):
+        calls.append((url, (headers or {}).get("Authorization")))
+        if url.endswith("/tracks"):
+            return _Resp(403, text="Active premium subscription required for the owner of the app.")
+        return _Resp(200, body={"id": url.rsplit("/", 1)[-1],
+                                "external_ids": {"isrc": url.rsplit("/", 1)[-1].upper()}})
+
+    monkeypatch.setattr(sc.requests, "get", fake_get)
+    assert sc._track_isrcs(["t1", "t2"]) == {"t1": "T1", "t2": "T2"}
+    assert calls == [
+        ("https://api.spotify.com/v1/tracks", "Bearer POOL0"),      # both pool apps tried
+        ("https://api.spotify.com/v1/tracks", "Bearer POOL1"),
+        ("https://api.spotify.com/v1/tracks/t1", "Bearer MAIN"),    # then one call per track
+        ("https://api.spotify.com/v1/tracks/t2", "Bearer MAIN"),
+    ]
+
+
+def test_track_isrcs_fails_closed_when_the_single_fallback_is_refused(monkeypatch):
+    # The fallback is a softer path, not a blind one: once it can't answer either
+    # (a spent dev-mode budget answers 429), the read still fails closed.
+    from songmirror.engine import spotify, spotify_cookie as sc
+    sc._isrc_cache.clear()
+    sc._singles_warned = True
+    monkeypatch.setattr(spotify, "isrc_app_count", lambda: 1)
+    monkeypatch.setattr(spotify, "app_token", lambda index=0: "POOL")
+    monkeypatch.setattr(spotify, "main_app_token", lambda: "MAIN")
+    monkeypatch.setattr(sc, "polite_sleep", lambda *_: None)
+    monkeypatch.setattr(sc.requests, "get",
+                        lambda url, **kw: _Resp(403 if url.endswith("/tracks") else 429))
+    with pytest.raises(requests.HTTPError):
+        sc._track_isrcs(["tX"])
 
 
 def test_track_isrcs_uses_app_batch_endpoint(monkeypatch):
@@ -193,3 +253,30 @@ def test_writes_use_oauth_by_default(monkeypatch):
     t = SpotifyTarget(_Sp(), "cache.json")
     t.add({"id": "pl1"}, ["t1"])
     assert added == [("pl1", ["spotify:track:t1"])]
+
+
+def test_singles_used_is_counted_per_call_and_drained_once(monkeypatch):
+    # The dashboard card is driven by this counter, so it must reflect calls actually
+    # spent against the daily budget, and a second pass must not re-report the first's.
+    from songmirror.engine import spotify, spotify_cookie as sc
+    sc._isrc_cache.clear()
+    sc._singles_warned = True
+    sc.take_singles_used()   # start from a known-zero
+    monkeypatch.setattr(spotify, "isrc_app_count", lambda: 1)
+    monkeypatch.setattr(spotify, "app_token", lambda index=0: "POOL")
+    monkeypatch.setattr(spotify, "main_app_token", lambda: "MAIN")
+    monkeypatch.setattr(sc, "polite_sleep", lambda *_: None)
+
+    def fake_get(url, **kw):
+        if url.endswith("/tracks"):
+            return _Resp(403)
+        tid = url.rsplit("/", 1)[-1]
+        if tid == "t3":
+            return _Resp(429)   # budget spent partway through
+        return _Resp(200, body={"id": tid, "external_ids": {"isrc": tid.upper()}})
+
+    monkeypatch.setattr(sc.requests, "get", fake_get)
+    with pytest.raises(requests.HTTPError):
+        sc._track_isrcs(["t1", "t2", "t3", "t4"])
+    assert sc.take_singles_used() == 2   # the 429 and the untried t4 cost nothing
+    assert sc.take_singles_used() == 0   # draining is what makes it per-pass

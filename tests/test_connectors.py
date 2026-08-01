@@ -100,3 +100,26 @@ def test_ytmusic_expired_cookies_report_expired_not_connected(tmp_path, monkeypa
     monkeypatch.setattr(ytmusicapi, "YTMusic",
                         lambda *a, **k: type("Y", (), {"get_account_info": lambda self: {}})())
     assert c.status().state == "expired"  # -> dashboard "sign-in expired" card + Reconnect
+
+
+def test_spotify_status_reports_a_refused_isrc_app(tmp_path, monkeypatch):
+    # The OAuth token can be perfectly healthy while the ISRC lookup app (a different
+    # app, a different grant) is refused. Nothing else goes red, so status has to say
+    # it or the sync just gets quietly slower.
+    from songmirror.engine import spotify
+
+    c = _conn("spotify", tmp_path)
+    c._store.save({"SPOTIFY_CLIENT_ID": "id", "SPOTIFY_CLIENT_SECRET": "sec"})
+    token = tmp_path / "token"
+    token.write_text("{}")
+    monkeypatch.setenv("SPOTIFY_TOKEN_CACHE", str(token))
+
+    monkeypatch.setattr(spotify, "isrc_app_problem", lambda: None)
+    assert c.status().state == "connected"
+
+    monkeypatch.setattr(spotify, "isrc_app_problem",
+                        lambda: "its owner account no longer has an active Spotify Premium subscription")
+    st = c.status()
+    assert st.state == "error"                 # -> dashboard "needs a look" card
+    assert "Premium" in st.detail
+    assert "continue" in st.detail             # and says the sync is degraded, not stopped
