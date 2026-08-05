@@ -8,6 +8,7 @@ from .apple import AppleConnector
 from .base import ConnStatus, Connector, DeviceCode, Field
 from .jellyfin import JellyfinConnector
 from .spotify import SpotifyConnector
+from .tidal import TidalConnector
 from .ytmusic import YTMusicConnector
 
 __all__ = ["CONNECTORS", "Connector", "ConnStatus", "DeviceCode", "Field"]
@@ -17,4 +18,5 @@ CONNECTORS = {
     "apple": AppleConnector,
     "ytmusic": YTMusicConnector,
     "jellyfin": JellyfinConnector,
+    "tidal": TidalConnector,
 }

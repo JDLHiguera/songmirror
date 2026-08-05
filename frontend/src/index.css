@@ -66,6 +66,8 @@
   --color-svc-ytmusic-soft: rgb(196 50 39 / 0.1);
   --color-svc-jellyfin: #7a58c5;
   --color-svc-jellyfin-soft: rgb(122 88 197 / 0.11);
+  --color-svc-tidal: #111111;
+  --color-svc-tidal-soft: rgb(17 17 17 / 0.11);
 
   /* ---- radii · squarer = steadier ---- */
   --radius-chip: 6px; /* chips, glyph tiles, tracklist numbers */
@@ -129,6 +131,8 @@
   --color-svc-ytmusic-soft: rgb(244 69 62 / 0.12);
   --color-svc-jellyfin: #ae8cec;
   --color-svc-jellyfin-soft: rgb(174 140 236 / 0.13);
+  --color-svc-tidal: #e0e0e0;
+  --color-svc-tidal-soft: rgb(224 224 224 / 0.12);
 
   --shadow-sm: 0 1px 2px rgb(0 0 0 / 0.4);
   --shadow-md: 0 6px 18px -6px rgb(0 0 0 / 0.45);

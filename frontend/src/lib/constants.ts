@@ -44,6 +44,7 @@ const SERVICE_STYLES: Record<string, ServiceStyle> = {
   yt: { label: 'YouTube Music', dot: 'bg-svc-ytmusic', soft: 'bg-svc-ytmusic-soft', text: 'text-svc-ytmusic' },
   ytmusic: { label: 'YouTube Music', dot: 'bg-svc-ytmusic', soft: 'bg-svc-ytmusic-soft', text: 'text-svc-ytmusic' },
   jellyfin: { label: 'Jellyfin', dot: 'bg-svc-jellyfin', soft: 'bg-svc-jellyfin-soft', text: 'text-svc-jellyfin' },
+  tidal: { label: 'Tidal', dot: 'bg-svc-tidal', soft: 'bg-svc-tidal-soft', text: 'text-svc-tidal' },
   sync: { label: 'Sync', dot: 'bg-accent', soft: 'bg-accent-soft', text: 'text-accent' },
   local: { label: 'Local files', dot: 'bg-info', soft: 'bg-info-soft', text: 'text-info' },
 }
@@ -69,11 +70,12 @@ export function tagText(tag: string): string {
 
 /** Provider id -> ServiceLogo id (both the "yt" event tag and the "ytmusic"
  * account id resolve to the same YouTube Music mark). */
-export function serviceLogoId(idOrTag: string): 'spotify' | 'apple' | 'ytmusic' | 'jellyfin' | null {
+export function serviceLogoId(idOrTag: string): 'spotify' | 'apple' | 'ytmusic' | 'jellyfin' | 'tidal' | null {
   if (idOrTag === 'spotify') return 'spotify'
   if (idOrTag === 'apple') return 'apple'
-  if (idOrTag === 'yt' || idOrTag === 'ytmusic') return 'ytmusic'
-  if (idOrTag === 'jellyfin') return 'jellyfin'
+  if (idOrTag === 'ytmusic' || idOrTag === 'yt') return 'ytmusic'
+  if (idOrTag === 'jellyfin' || idOrTag === 'jelly') return 'jellyfin'
+  if (idOrTag === 'tidal') return 'tidal'
   return null
 }
 

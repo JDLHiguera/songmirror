@@ -12,6 +12,7 @@ caching, safety rails — is provider-agnostic and needs no change.
 from .apple import AppleMusicTarget
 from .base import MirrorTarget, TargetAuthError, mirror_pair, reconcile
 from .spotify_target import SpotifyTarget
+from . import tidal
 from . import ytmusic
 
 __all__ = ["AppleMusicTarget", "SpotifyTarget", "MirrorTarget", "TargetAuthError",
@@ -38,8 +39,9 @@ _REGISTRY = {
         SpotifyTarget(sp, opts.spotify_cache_file, sync_peer=sync_peer, songs=songs) if sp is not None else None),
     "apple": lambda opts, sp, sync_peer=False, songs=None: _apple(opts),
     "ytmusic": lambda opts, sp, sync_peer=False, songs=None: ytmusic.build(),
+    "tidal": lambda opts, sp, sync_peer=False, songs=None: tidal.build(opts),
 }
-_SOURCE_ORDER = ["spotify", "apple", "ytmusic"]
+_SOURCE_ORDER = ["spotify", "apple", "ytmusic", "tidal"]
 
 
 def build_targets(opts, sp=None):

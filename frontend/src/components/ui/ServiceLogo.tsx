@@ -1,6 +1,6 @@
-import { SiApplemusic, SiJellyfin, SiSpotify, SiYoutubemusic } from 'react-icons/si'
+import { SiApplemusic, SiJellyfin, SiSpotify, SiYoutubemusic, SiTidal } from 'react-icons/si'
 
-export type ServiceId = 'spotify' | 'apple' | 'ytmusic' | 'jellyfin'
+export type ServiceId = 'spotify' | 'apple' | 'ytmusic' | 'jellyfin' | 'tidal'
 
 interface ServiceLogoProps {
   service: ServiceId
@@ -23,5 +23,9 @@ export function ServiceLogo({ service, className }: ServiceLogoProps) {
       return <SiYoutubemusic className={className} aria-hidden="true" />
     case 'jellyfin':
       return <SiJellyfin className={className} aria-hidden="true" />
+    case 'tidal':
+      return <SiTidal className={className} aria-hidden="true" />
+    default:
+      return null
   }
 }
