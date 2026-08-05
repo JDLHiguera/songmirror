@@ -135,9 +135,7 @@ class TidalTarget(MirrorTarget):
         return out
 
     def resolve(self, track, cache):
-        # We don't have a specific ISRC lookup cache built-in, so we search.
-        # But wait, tidalapi might support ISRC search, we will try the general search.
-        return self._search(track["name"], track["artists"], track["duration_ms"], cache), "search"
+        return self._search(track["name"], track["artists"], track["duration_ms"], cache, track.get("artist", "")), "search"
 
     def _search_once(self, term, name, artists, duration_ms):
         import tidalapi
@@ -165,14 +163,18 @@ class TidalTarget(MirrorTarget):
                 
         return best_id
 
-    def _search(self, name, artists, duration_ms, cache):
+    def _search(self, name, artists, duration_ms, cache, track_artist=""):
+        from ..matching import track_key
         primary = artists[0] if artists else ""
         if not f"{name} {primary}".strip():
             return None
             
-        key = f"{name}|{primary}".casefold()
+        key = track_key(name, track_artist)
         if key in cache.get("search", {}):
-            return cache["search"][key]
+            val = cache["search"][key]
+            if isinstance(val, str) and "tidal.com" in val and "/track/" in val:
+                val = val.split("/track/")[1].split("/")[0].split("?")[0]
+            return val
             
         if "search" not in cache:
             cache["search"] = {}
@@ -190,14 +192,22 @@ class TidalTarget(MirrorTarget):
         return best
 
     def add(self, playlist, target_ids):
-        # tidalapi playlist.add expects a list of track IDs
+        # tidalapi playlist.add has a strict limit on the number of items per request
+        # (usually 50-100), otherwise it returns HTTP 400.
         if not target_ids:
             return
         pl = playlist.get("_obj") if isinstance(playlist, dict) else playlist
-        try:
-            pl.add(target_ids)
-        except Exception as e:
-            log_warn(f"Failed to add tracks to Tidal playlist: {e}", tag=self.tag)
+        
+        # Chunk into batches of 50
+        batch_size = 50
+        for i in range(0, len(target_ids), batch_size):
+            chunk = target_ids[i:i + batch_size]
+            try:
+                pl.add(chunk)
+                from ..config import polite_sleep
+                polite_sleep(0.5)
+            except Exception as e:
+                log_warn(f"Failed to add tracks to Tidal playlist (batch {i}): {e}", tag=self.tag)
 
     def remove(self, playlist, track):
         pl = playlist.get("_obj") if isinstance(playlist, dict) else playlist
